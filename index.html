@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Hybrid Crypto-Stego Client</title>
+
+<style>
+/* Background */
+body {
+    margin: 0;
+    font-family: "Poppins", sans-serif;
+    background: linear-gradient(135deg, #0f0c29, #302b63, #24243e);
+    min-height: 100vh;
+    padding: 30px;
+    color: #fff;
+}
+
+/* Container Card */
+.box {
+    background: rgba(255,255,255,0.08);
+    padding: 25px;
+    margin-bottom: 25px;
+    border-radius: 15px;
+    backdrop-filter: blur(12px);
+    border: 1px solid rgba(255,255,255,0.2);
+    animation: fadeIn 0.7s ease-in-out;
+}
+
+/* Title */
+h1 {
+    text-align: center;
+    font-size: 34px;
+    margin-bottom: 30px;
+    letter-spacing: 1px;
+    text-shadow: 0 0 10px rgba(255,255,255,0.4);
+}
+
+/* Buttons */
+button {
+    background: #6a11cb;
+    background: linear-gradient(135deg, #6a11cb, #2575fc);
+    border: none;
+    padding: 12px 20px;
+    border-radius: 10px;
+    cursor: pointer;
+    color: white;
+    font-size: 16px;
+    transition: 0.3s;
+    margin-right: 10px;
+}
+
+button:hover {
+    transform: scale(1.07);
+    box-shadow: 0 0 15px rgba(255,255,255,0.4);
+}
+
+/* Inputs & Textareas */
+input, textarea {
+    width: 100%;
+    padding: 12px;
+    border-radius: 10px;
+    border: none;
+    margin-top: 8px;
+    margin-bottom: 15px;
+    background: rgba(255,255,255,0.15);
+    color: #fff;
+    font-size: 15px;
+    backdrop-filter: blur(5px);
+}
+
+input::file-selector-button {
+    background: #2575fc;
+    border: none;
+    padding: 8px 12px;
+    border-radius: 8px;
+    color: white;
+}
+
+/* Download Link */
+a {
+    color: #00eaff;
+    font-weight: bold;
+    display: inline-block;
+    margin-top: 10px;
+    font-size: 17px;
+}
+
+/* Fade Animation */
+@keyframes fadeIn {
+    0% { opacity: 0; transform: translateY(10px); }
+    100% { opacity: 1; transform: translateY(0); }
+}
+
+</style>
+</head>
+
+<body>
+
+<h1>🔐 CryptAVIT</h1>
+
+<div class="box">
+    <h2>Choose Role</h2>
+    <button onclick="setRole('sender')">Sender</button>
+    <button onclick="setRole('receiver')">Receiver</button>
+</div>
+
+<div id="receiver-box" class="box" style="display:none;">
+    <h2>Receiver: Generate Key Pair</h2>
+    <button onclick="generateKeys()">Generate RSA Keys</button>
+    <h3>Public Key</h3>
+    <textarea id="public-key" rows="6"></textarea>
+    <h3>Private Key</h3>
+    <textarea id="private-key" rows="6"></textarea>
+</div>
+
+<div id="sender-box" class="box" style="display:none;">
+    <h2>Sender: Encrypt & Hide Message</h2>
+
+    <label>Public Key from Receiver:</label>
+    <textarea id="sender-publickey" rows="6"></textarea>
+
+    <label>Secret Message:</label>
+    <textarea id="sender-message" rows="4"></textarea>
+
+    <label>Choose Media File:</label>
+    <input type="file" id="media-file">
+
+    <button onclick="encryptAndEmbed()">Encrypt & Embed</button>
+
+    <h3>Download Stego File:</h3>
+    <a id="download-link" href="#" download style="display:none;">⬇ Download Stego File</a>
+</div>
+
+<div id="receiver-decrypt-box" class="box" style="display:none;">
+    <h2>Receiver: Decrypt Message</h2>
+
+    <label>Private Key:</label>
+    <textarea id="decrypt-privatekey" rows="6"></textarea>
+
+    <label>Upload Stego File:</label>
+    <input type="file" id="decrypt-file">
+
+    <button onclick="decryptStego()">Decrypt</button>
+
+    <h3>Decrypted Message:</h3>
+    <textarea id="decrypted-output" rows="4"></textarea>
+</div>
+
+
+<script>
+
+const API = "https://fp-wuyb.onrender.com";
+
+function setRole(role) {
+    document.getElementById("sender-box").style.display = "none";
+    document.getElementById("receiver-box").style.display = "none";
+    document.getElementById("receiver-decrypt-box").style.display = "none";
+
+    if (role === "sender") {
+        document.getElementById("sender-box").style.display = "block";
+    } else {
+        document.getElementById("receiver-box").style.display = "block";
+        document.getElementById("receiver-decrypt-box").style.display = "block";
+    }
+}
+
+async function generateKeys() {
+    let res = await fetch(`${API}/generate_keys`);
+    let data = await res.json();
+    document.getElementById("public-key").value = data.public_key;
+    document.getElementById("private-key").value = data.private_key;
+}
+
+async function encryptAndEmbed() {
+    let pk = document.getElementById("sender-publickey").value;
+    let msg = document.getElementById("sender-message").value;
+    let file = document.getElementById("media-file").files[0];
+
+    let fd = new FormData();
+    fd.append("public_key", pk);
+    fd.append("message", msg);
+    fd.append("media", file);
+
+    let res = await fetch(`${API}/encrypt_embed`, { method: "POST", body: fd });
+    let blob = await res.blob();
+
+    let url = URL.createObjectURL(blob);
+    let a = document.getElementById("download-link");
+    a.href = url;
+    a.style.display = "block";
+}
+
+async function decryptStego() {
+    let priv = document.getElementById("decrypt-privatekey").value;
+    let file = document.getElementById("decrypt-file").files[0];
+
+    let fd = new FormData();
+    fd.append("private_key", priv);
+    fd.append("media", file);
+
+    let res = await fetch(`${API}/decrypt`, { method: "POST", body: fd });
+    let out = await res.json();
+    document.getElementById("decrypted-output").value = out.message;
+}
+
+</script>
+
+</body>
+</html>
