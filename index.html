@@ -171,23 +171,60 @@ async function generateKeys() {
 }
 
 async function encryptAndEmbed() {
-    let pk = document.getElementById("sender-publickey").value;
-    let msg = document.getElementById("sender-message").value;
-    let file = document.getElementById("media-file").files[0];
+    const pk = document.getElementById("sender-publickey").value.trim();
+    const msg = document.getElementById("sender-message").value.trim();
+    const fileInput = document.getElementById("media-file");
+    const file = fileInput.files[0];
 
-    let fd = new FormData();
+    if (!pk || !msg || !file) {
+        alert("Please provide public key, secret message, and a media file.");
+        return;
+    }
+
+    const fd = new FormData();
     fd.append("public_key", pk);
     fd.append("message", msg);
     fd.append("media", file);
 
-    let res = await fetch(`${API}/encrypt_embed`, { method: "POST", body: fd });
-    let blob = await res.blob();
+    const res = await fetch(`${API}/encrypt_embed`, {
+        method: "POST",
+        body: fd,
+    });
 
-    let url = URL.createObjectURL(blob);
-    let a = document.getElementById("download-link");
+    // If backend failed (e.g., 500), show the error text instead of downloading HTML
+    if (!res.ok) {
+        const errText = await res.text();
+        alert("Server error: " + errText);
+        return;
+    }
+
+    const blob = await res.blob();
+
+    // Prefer filename sent by Flask (from send_file(download_name=...))
+    const cd = res.headers.get("Content-Disposition");
+    let filename = "stego_file";
+
+    if (cd && cd.includes("filename=")) {
+        // e.g. Content-Disposition: attachment; filename=stego_audio.wav
+        filename = cd.split("filename=")[1].trim().replace(/["']/g, "");
+    } else {
+        // Fallback: infer extension from original file type
+        const originalName = file.name.toLowerCase();
+        if (originalName.endsWith(".wav")) filename = "stego_audio.wav";
+        else if (originalName.endsWith(".png") || originalName.endsWith(".jpg") || originalName.endsWith(".jpeg"))
+            filename = "stego_image.png";
+        else if (originalName.endsWith(".txt")) filename = "stego_text.txt";
+        else if (originalName.match(/\.(mp4|avi|mov|mkv)$/)) filename = "stego_video.mp4";
+    }
+
+    const url = URL.createObjectURL(blob);
+    const a = document.getElementById("download-link");
     a.href = url;
-    a.style.display = "block";
+    a.download = filename;              // forces correct name + extension, e.g. stego_audio.wav
+    a.textContent = "⬇ Download " + filename;
+    a.style.display = "inline-block";
 }
+
 
 async function decryptStego() {
     let priv = document.getElementById("decrypt-privatekey").value;
