@@ -176,103 +176,36 @@ def extract_bytes_from_text_file(in_path):
 # AUDIO STEGO (WAV; LSB on PCM samples)
 # ---------------------------------------------
 def embed_bytes_in_audio_file(in_path, payload, out_path):
-    # Read as 16-bit PCM (soundfile will convert if needed)
-    data, samplerate = sf.read(in_path, dtype='int16')
+    # Read audio as 16-bit PCM
+    data, samplerate = sf.read(in_path, dtype='int16')   # data is int16 or can be cast
     arr = np.array(data, dtype=np.int16)
-    flat = arr.reshape(-1)
+
+    # Work in int32 to avoid overflow problems, then cast back to int16
+    flat = arr.reshape(-1).astype(np.int32)
 
     packed = pack_payload(payload)
-    bits = np.array([int(b) for byte in packed for b in f"{byte:08b}"], dtype=np.uint8)
+    bits = np.array(
+        [int(b) for byte in packed for b in f"{byte:08b}"],
+        dtype=np.int32
+    )
 
     if len(bits) > flat.size:
         raise ValueError("Audio file too small to hold payload")
 
-    flat[:len(bits)] = (flat[:len(bits)] & 0xFFFE) | bits
+    # Clear LSB and set it to payload bit.
+    # Use ~1 instead of 0xFFFE so it matches the signed type.
+    flat[:len(bits)] = (flat[:len(bits)] & ~1) | bits
 
+    # Clip back into int16 range and reshape
+    flat = np.clip(flat, -32768, 32767).astype(np.int16)
     stego = flat.reshape(arr.shape)
-    sf.write(out_path, stego.astype(np.int16), samplerate, subtype='PCM_16')
+
+    # Write back as 16-bit PCM WAV
+    sf.write(out_path, stego, samplerate, subtype='PCM_16')
     return out_path
-
-
-def extract_bytes_from_audio_file(in_path):
-    data, samplerate = sf.read(in_path, dtype='int16')
-    arr = np.array(data, dtype=np.int16)
-    flat = arr.reshape(-1)
-
-    if flat.size < 32:
-        raise ValueError("Audio too short to contain header")
-
-    header_bits = flat[:32] & 1
-    length = int("".join(str(b) for b in header_bits), 2)
-
-    total_bits = 32 + length * 8
-    if total_bits > flat.size:
-        raise ValueError("Corrupted or incomplete stego audio")
-
-    bits = flat[32:total_bits] & 1
-
-    data_bytes = [
-        int("".join(str(bit) for bit in bits[i:i + 8]), 2)
-        for i in range(0, len(bits), 8)
-    ]
-
-    return bytes(data_bytes)
-
 # ---------------------------------------------
 # VIDEO STEGO (LSB on frames using OpenCV)
 # ---------------------------------------------
-def embed_bytes_in_video_file(in_path, payload, out_path):
-    cap = cv2.VideoCapture(in_path)
-    if not cap.isOpened():
-        raise ValueError("Cannot open input video")
-
-    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    fps = cap.get(cv2.CAP_PROP_FPS)
-
-    if frame_count <= 0 or width <= 0 or height <= 0 or fps <= 0:
-        cap.release()
-        raise ValueError("Invalid video properties")
-
-    packed = pack_payload(payload)
-    bits = np.array([int(b) for byte in packed for b in f"{byte:08b}"], dtype=np.uint8)
-
-    total_capacity = frame_count * width * height * 3  # 3 channels (BGR)
-    if len(bits) > total_capacity:
-        cap.release()
-        raise ValueError("Video too small to hold payload")
-
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    out = cv2.VideoWriter(out_path, fourcc, fps, (width, height))
-
-    bit_idx = 0
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-
-        if bit_idx < len(bits):
-            flat = frame.reshape(-1)
-            remaining = len(bits) - bit_idx
-            chunk_size = min(remaining, flat.size)
-
-            flat[:chunk_size] = (flat[:chunk_size] & 0xFE) | bits[bit_idx:bit_idx + chunk_size]
-            bit_idx += chunk_size
-
-            frame = flat.reshape(frame.shape)
-
-        out.write(frame)
-
-    cap.release()
-    out.release()
-
-    if bit_idx < len(bits):
-        raise ValueError("Not all bits were embedded into the video (unexpected)")
-
-    return out_path
-
-
 def extract_bytes_from_video_file(in_path):
     cap = cv2.VideoCapture(in_path)
     if not cap.isOpened():
@@ -314,6 +247,91 @@ def extract_bytes_from_video_file(in_path):
     ]
 
     return bytes(data_bytes)
+import subprocess
+
+def merge_video_and_audio(stego_video_path, original_video_path, final_output_path):
+    """
+    Uses FFmpeg to merge audio from original video into the stego video.
+    Both must have the same number of frames & duration roughly.
+    """
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i", stego_video_path,
+        "-i", original_video_path,
+        "-c:v", "copy",        # copy video stream (stego frames)
+        "-c:a", "aac",         # re-encode audio to AAC
+        "-map", "0:v:0",       # take video from stego
+        "-map", "1:a:0?",      # take audio from original (if exists)
+        "-shortest",
+        final_output_path
+    ]
+
+    try:
+        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+    except Exception as e:
+        raise RuntimeError(f"FFmpeg merge failed: {e}")
+
+    return final_output_path
+
+def embed_bytes_in_video_file(in_path, payload, out_path):
+    cap = cv2.VideoCapture(in_path)
+    if not cap.isOpened():
+        raise ValueError("Cannot open input video")
+
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    if fps <= 0:
+        fps = 25  # fallback
+
+    if frame_count <= 0 or width <= 0 or height <= 0:
+        cap.release()
+        raise ValueError("Invalid video properties")
+
+    packed = pack_payload(payload)
+    bits = np.array(
+        [int(b) for byte in packed for b in f"{byte:08b}"],
+        dtype=np.uint8,
+    )
+
+    total_capacity = frame_count * width * height * 3  # 3 channels (BGR)
+    if len(bits) > total_capacity:
+        cap.release()
+        raise ValueError("Video too small to hold payload")
+
+    # IMPORTANT: write to AVI with MJPG (less destructive than mp4v)
+    # Still not truly lossless, but much better for LSB than H.264/mp4v
+    fourcc = cv2.VideoWriter_fourcc(*"MJPG")
+    out = cv2.VideoWriter(out_path, fourcc, fps, (width, height), True)
+
+    bit_idx = 0
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        if bit_idx < len(bits):
+            flat = frame.reshape(-1)
+            remaining = len(bits) - bit_idx
+            chunk_size = min(remaining, flat.size)
+
+            flat[:chunk_size] = (flat[:chunk_size] & 0xFE) | bits[bit_idx:bit_idx + chunk_size]
+            bit_idx += chunk_size
+
+            frame = flat.reshape(frame.shape)
+
+        out.write(frame)
+
+    cap.release()
+    out.release()
+
+    if bit_idx < len(bits):
+        raise ValueError("Not all bits were embedded into the video (unexpected)")
+
+    return out_path
+
 
 # ---------------------------------------------
 # FLASK API
@@ -362,10 +380,18 @@ def api_encrypt_embed():
             embed_bytes_in_audio_file(temp_in, encrypted, outfile)
 
         elif name.endswith((".mp4", ".avi", ".mov", ".mkv")):
-            outfile = temp_out + ".mp4"
+            silent_stego = temp_out + "_silent.avi"     # AVI temp for OpenCV
+            final_video = temp_out + ".mp4"             # MP4 with audio merged
+
+            embed_bytes_in_video_file(temp_in, encrypted, silent_stego)
+            merge_video_and_audio(silent_stego, temp_in, final_video)
+
+            outfile = final_video
             mimetype = "video/mp4"
             download_name = "stego_video.mp4"
-            embed_bytes_in_video_file(temp_in, encrypted, outfile)
+
+
+
 
         else:
             return "Unsupported file", 400
@@ -420,3 +446,4 @@ def index():
 # ---------------------------------------------
 if __name__ == "__main__":
     app.run(debug=True)
+
